@@ -1,0 +1,448 @@
+
+#include <LiquidCrystal.h>
+#include <DHT.h>
+#include <EEPROM.h>
+
+LiquidCrystal lcd(12, 11, 9, 8, 7, 6);
+// Soil Moisture
+#define SOIL_pin A0         // pin sensor
+#define SOIL_jeda 2000      // sensing interval
+// Ambient Light
+#define LIGHT_pin A1        // pin sensor
+// LED
+#define LED_pin 13          // pin LED RED
+#define LED_jeda 500        // blink interval
+
+#define BL_pin 3            // pin Backlight LCD
+#define BL_max 255          // maximum backlight
+#define BL_min 5            // minumum backlight
+//#define BL_jeda 300000      // 5 minute
+#define BL_jeda 3000      // 5 minute
+#define Button_jeda 250     // for debouncing
+#define Mode_pin 16         // Mode button
+#define Plus_pin 17
+#define Minus_pin 18
+// DHT11 - Digital Humidity & Temperature
+#define TEMP_pin 10         // pin DHT11 (temp & humidity)
+#define TEMP_jeda 3000      // sensing interval
+#define TEMP_alert 28       // give alert when temp reach 27*C
+
+unsigned long SOIL_millis = 0;
+unsigned long TEMP_millis = 0;
+unsigned long BL_millis = 0;
+unsigned long prev_millis = 0;
+unsigned long LED_millis = 0;
+
+boolean BL_on = true;
+int LED_state = 0;
+int SOIL_bottom = 0;
+int mode = 0;
+int suhu = 0;
+int batas_suhu = 0;
+int temp_batas_suhu = 0;
+int soil_bawah = 0;
+int temp_soil_bawah = 0;
+int soil_atas = 0;
+int temp_soil_atas = 0;
+
+byte derajat_ori[8] = {
+  0b00100,
+  0b01010,
+  0b00100,
+  0b00000,
+  0b00000,
+  0b00000,
+  0b00000,
+  0b00000
+};
+byte c_derajat[8] = {
+  0b11000,
+  0b11000,
+  0b00011,
+  0b00100,
+  0b00100,
+  0b00011,
+  0b00000,
+  0b00000
+};
+byte c_batas[8] = {
+  0b00000,
+  0b00000,
+  0b01000,
+  0b11100,
+  0b11100,
+  0b10100,
+  0b10100,
+  0b10100
+};
+byte c_kurang[8] = {
+  0b00100,
+  0b01000,
+  0b10000,
+  0b01000,
+  0b00100,
+  0b00000,
+  0b00000,
+  0b00000
+};
+byte c_sama[8] = {
+  0b00000,
+  0b11100,
+  0b00000,
+  0b11100,
+  0b00000,
+  0b00000,
+  0b00000,
+  0b00000
+};
+byte c_lebih[8] = {
+  0b00100,
+  0b00010,
+  0b00001,
+  0b00010,
+  0b00100,
+  0b00000,
+  0b00000,
+  0b00000
+};
+
+void setup() {
+  // inisiasi nilai ambang utk pemrograman pertama kali
+  
+  //EEPROM_write(0, 1, 25); // tulis ambang suhu
+  //EEPROM_write(1, 3, 100); // tulis ambang bawah soil moisture, mulai watering
+  //EEPROM_write(4, 3, 750); // tulis ambang atas soil moisture, matikan watering
+  
+  analogReference(DEFAULT);
+  // setup pin
+  pinMode(LED_pin, OUTPUT);
+  pinMode(TEMP_pin, INPUT);
+  pinMode(BL_pin, OUTPUT);
+  pinMode(Mode_pin, INPUT);
+  pinMode(Plus_pin, INPUT);
+  pinMode(Minus_pin, INPUT);
+  // nyalakan backlight
+  analogWrite(BL_pin, BL_max);
+  // set up the LCD's number of columns and rows: 
+  lcd.createChar(0, c_derajat);
+  lcd.createChar(1, c_batas);
+  lcd.createChar(2, c_kurang);
+  lcd.createChar(3, c_sama);
+  lcd.createChar(4, c_lebih);
+  lcd.begin(16, 2);
+  // Print a message to the LCD.
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Autogardening v0");
+  lcd.setCursor(0,1);
+  lcd.print("     Nyoba");
+  mode = 0;
+  // Baca parameter2
+  batas_suhu = EEPROM_read(0, 1);
+  soil_bawah = EEPROM_read(1, 3);
+  soil_atas = EEPROM_read(4, 3);
+  
+  delay(2000);
+  Main_display();
+  BL_on = true;
+  BL_millis = millis();
+}
+
+void loop() {
+  SOIL_read();
+  TEMP_read();
+  //BL_check();
+  LED_blink();
+  BTN_check();
+  if (mode == 0) {
+    //
+  }
+  else {
+    BTN_actions();
+  }
+}
+
+void Main_display() {
+  // initial display
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.write((byte)1);
+  lcd.print("SOI LIG HUM TMP");
+  lcd.setCursor(0,1);
+  lcd.print("~");
+  lcd.noBlink();
+}
+
+void BTN_check() {
+  int btn = digitalRead(Mode_pin);
+  unsigned long mi = millis();
+  if (btn == HIGH && mi - prev_millis > Button_jeda) {
+    if (BL_on == false) {
+      analogWrite(BL_pin, BL_max);
+      BL_on = true;
+      BL_millis = millis();
+    }
+    // action before changing mode
+    if (mode == 1) {
+      // tulis ambang suhu
+      if (temp_batas_suhu != batas_suhu) {
+        batas_suhu = temp_batas_suhu;
+        EEPROM_write(0, 1, batas_suhu);
+        lcd.clear();
+        lcd.print("SOI LIG HUM TMP");
+        lcd.print("Temp. threshold ");
+        lcd.setCursor(0,1);
+        lcd.print("writtn to memory");
+        delay(1000);
+      }
+    }
+    else if (mode == 2) {
+      // tulis ambang bawah soil
+      if (temp_soil_bawah != soil_bawah) {
+        soil_bawah = temp_soil_bawah;
+        EEPROM_write(1, 3, soil_bawah);
+        lcd.clear();
+        lcd.print("Lowr soil thresh");
+        lcd.setCursor(0,1);
+        lcd.print("writtn to memory");
+        delay(1000);
+      }
+    }
+    else if (mode == 3) {
+      // tulis ambang atas soil
+      if (temp_soil_atas != soil_atas) {
+        soil_atas = temp_soil_atas;
+        EEPROM_write(4, 3, soil_atas);
+        lcd.clear();
+        lcd.print("Uppr soil thresh");
+        lcd.setCursor(0,1);
+        lcd.print("writtn to memory");
+        delay(1000);
+      }
+    }
+    delay(10);
+    // Ganti mode
+    mode++;
+    if (mode > 3) mode = 0;
+    // action setelah ganti mode
+    lcd.clear();
+    if (mode == 0) {
+      Main_display();
+    }
+    else if (mode == 1) {
+      temp_batas_suhu = batas_suhu;
+      lcd.setCursor(0,0);
+      lcd.print(mode);
+      lcd.print(".Blink Red LED");
+      lcd.setCursor(0,1);
+      lcd.print("when temp >=");
+      lcd.setCursor(13, 1);
+      lcd.print(temp_batas_suhu);
+      lcd.setCursor(15,1);
+      lcd.write((byte)0);
+    }
+    else if (mode == 2) {
+      temp_soil_bawah = soil_bawah;
+      lcd.setCursor(0,0);
+      lcd.print(mode);
+      lcd.print(".Start watering");
+      lcd.setCursor(0,1);
+      lcd.print("when moist<=    ");
+      lcd.setCursor(13,1);
+      lcd.print(temp_soil_bawah);
+    }
+    else if (mode == 3) {
+      temp_soil_atas = soil_atas;
+      lcd.setCursor(0,0);
+      lcd.print(mode);
+      lcd.print(".Stop watering");
+      lcd.setCursor(0,1);
+      lcd.print("when moist>=    ");
+      lcd.setCursor(13,1);
+      lcd.print(temp_soil_atas);
+    }
+    // pertahankan backlight tetap nyala sampai jeda berikutnya
+    prev_millis = millis();
+  }
+}
+
+void BTN_actions() {
+  // Penekanan tombol Plus
+  int btn_up = digitalRead(Plus_pin);
+  if (btn_up == HIGH && millis() - prev_millis > Button_jeda) {
+    // jika editor batas suhu
+    if (mode == 1) {
+      temp_batas_suhu++;
+      if (temp_batas_suhu >= 99) temp_batas_suhu = 99;
+      lcd.setCursor(13,1);
+      lcd.print("  ");
+      lcd.setCursor(13,1);
+      lcd.print(temp_batas_suhu);
+    }
+    else if (mode == 2) {
+      temp_soil_bawah++;
+      if (temp_soil_bawah >= 750) temp_soil_bawah = 750;
+      lcd.setCursor(13,1);
+      lcd.print("   ");
+      lcd.setCursor(13,1);
+      lcd.print(temp_soil_bawah);
+    }
+    else if (mode == 3) {
+      temp_soil_atas++;
+      if (temp_soil_atas >= 750) temp_soil_atas = 750;
+      lcd.setCursor(13,1);
+      lcd.print("   ");
+      lcd.setCursor(13,1);
+      lcd.print(temp_soil_atas);
+    }
+    delay(10);
+    prev_millis = millis();
+  }
+  // Penekanan tombol Minus
+  int btn_down = digitalRead(Minus_pin);
+  if (btn_down == HIGH && millis() - prev_millis > Button_jeda) {
+    if (mode == 1) {
+      temp_batas_suhu--;
+      if (temp_batas_suhu <= 0) temp_batas_suhu = 0;
+      lcd.setCursor(13,1);
+      lcd.print("  ");
+      lcd.setCursor(13,1);
+      lcd.print(temp_batas_suhu);
+    }
+    else if (mode == 2) {
+      temp_soil_bawah--;
+      if (temp_soil_bawah <= 0) temp_soil_bawah = 0;
+      lcd.setCursor(13,1);
+      lcd.print("   ");
+      lcd.setCursor(13,1);
+      lcd.print(temp_soil_bawah);
+    }
+    else if (mode == 3) {
+      temp_soil_atas--;
+      if (temp_soil_atas <= 0) temp_soil_atas = 0;
+      lcd.setCursor(13,1);
+      lcd.print("   ");
+      lcd.setCursor(13,1);
+      lcd.print(temp_soil_atas);
+    }
+    delay(10);
+    prev_millis = millis();
+  }
+}
+
+void BL_check() {
+  if (BL_on == true) {
+    unsigned long BL_current = millis();
+    if (BL_current - BL_millis > BL_jeda) {
+      for (int i=BL_max; i>=BL_min; i--) {
+        analogWrite(BL_pin, i);
+        delay(10);
+      }
+      BL_on = false;
+      BL_millis = millis();
+    }
+  }
+}
+
+void LED_blink() {
+  unsigned long LED_current = millis();
+  if (LED_current - LED_millis > LED_jeda) {
+    if (suhu >= batas_suhu) {
+      if (LED_state == LOW) {
+        LED_state = HIGH;
+      }
+      else {
+        LED_state = LOW;
+      }
+    }
+    else {
+      LED_state = LOW;
+    }
+    digitalWrite(LED_pin, LED_state);
+    LED_millis = millis();
+  }
+}
+
+void SOIL_read() {
+  if (mode == 0) {
+    unsigned long SOIL_current = millis();
+    if (SOIL_current - SOIL_millis > SOIL_jeda) {
+      SOIL_millis = millis();
+      // Read Soil Moisture
+      int SOIL_val = analogRead(SOIL_pin);
+      lcd.setCursor(1,1);
+      lcd.print("   ");
+      lcd.setCursor(1,1);
+      lcd.print(SOIL_val);
+      // Read Ambient Light
+      int LIGHT_val = analogRead(LIGHT_pin);
+      lcd.setCursor(5, 1);
+      lcd.print("   ");
+      lcd.setCursor(5, 1);
+      lcd.print(LIGHT_val);
+      
+      // tuliskan simbol
+      if (SOIL_val < soil_bawah) {
+        lcd.setCursor(0,1);
+        lcd.write((byte)2);
+      }
+      else if (SOIL_val > soil_atas) {
+        lcd.setCursor(0,1);
+        lcd.write((byte)4);
+      }
+      else {
+        lcd.setCursor(0,1);
+        lcd.write((byte)3);
+      }
+    }
+  }
+}
+
+void TEMP_read() {
+  if (mode == 0) {
+    unsigned long TEMP_current = millis();
+    if (TEMP_current - TEMP_millis > TEMP_jeda) {
+      TEMP_millis = millis();
+    
+      int chk = DHT11.read(TEMP_pin);
+      switch(chk) {
+        case DHTLIB_OK : 
+             lcd.setCursor(9, 1);
+             lcd.print("        ");
+             lcd.setCursor(9, 1);
+             lcd.print((float)DHT11.humidity, 0);
+             lcd.print("%");
+             lcd.setCursor(13, 1);
+             suhu = (int)DHT11.temperature;
+             //lcd.print((float)DHT11.temperature, 0);
+             lcd.print(suhu);
+             lcd.write((byte)0);
+             break;
+        case DHTLIB_ERROR_CHECKSUM : 
+             lcd.setCursor(9, 1); 
+             lcd.print("ERR CEK");
+             break;
+        case DHTLIB_ERROR_TIMEOUT : 
+             lcd.setCursor(9, 1);
+             lcd.print("ERR TMO");
+             break;
+        default : 
+             lcd.setCursor(9, 1);
+             lcd.print("ERR UNK");
+             break;
+      }
+    }
+  }
+}
+
+int EEPROM_read(int pos, int jml) {
+  int val = 0;
+  for (int i=pos; i= 255) {
+      EEPROM.write(i, 255);
+      val = val - 255;
+    }
+    else {
+      EEPROM.write(i, val);
+      val = val - val;
+    }
+  }
